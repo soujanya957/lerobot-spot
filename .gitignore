@@ -1,0 +1,13 @@
+# Python env/cache
+.venv/
+__pycache__/
+*.pyc
+
+# Local data/artifacts
+data/
+*.log
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/

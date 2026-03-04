@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: lerobot_robot_spot
+Version: 0.0.1
+Summary: LeRobot Plugin: Boston Dynamics Spot Robot
+Requires-Dist: lerobot>=0.4.4
+Requires-Dist: bosdyn_client
+Requires-Dist: bosdyn_api
+Provides-Extra: dev
+Requires-Dist: ipython; extra == "dev"

@@ -1,0 +1,6 @@
+pyproject.toml
+lerobot_robot_spot.egg-info/PKG-INFO
+lerobot_robot_spot.egg-info/SOURCES.txt
+lerobot_robot_spot.egg-info/dependency_links.txt
+lerobot_robot_spot.egg-info/requires.txt
+lerobot_robot_spot.egg-info/top_level.txt
