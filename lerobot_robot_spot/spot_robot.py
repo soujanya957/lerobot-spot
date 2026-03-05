@@ -571,7 +571,7 @@ class SpotRobot(Robot):
         else:
             qw, qx, qy, qz = qw / q_norm, qx / q_norm, qy / q_norm, qz / q_norm
 
-        arm_motion_time = float(self.config.extra.get("arm_pose_command_seconds", 0.4))
+        arm_motion_time = float(self.config.extra.get("arm_pose_command_seconds", 0.1))
         arm_cmd = RobotCommandBuilder.arm_pose_command(
             x=x,
             y=y,
