@@ -23,6 +23,7 @@ Controls (press repeatedly, commands are incremental):
     8/5 : pitch +/-
     9/6 : yaw +/-
     r   : reset arm target to current observed pose
+    p   : reset arm target to original startup pose
 
   Episode/session:
     n : end current episode early and save it
@@ -46,7 +47,7 @@ from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
-from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts
+from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
 from lerobot.processor import make_default_processors
 from lerobot.utils.constants import ACTION, OBS_STR
 
@@ -178,7 +179,7 @@ def print_help() -> None:
     print("  base: w/s vx, z/c vy, a/d vyaw, <space> stop base")
     print("  pos : u/j x, i/k y, o/l z")
     print("  rot : 7/4 roll, 8/5 pitch, 9/6 yaw")
-    print("  arm : r reset pose target to current observed hand pose")
+    print("  arm : r reset target to current observed hand pose, p reset to startup pose")
     print("  run : n end episode, q quit, h help")
 
 
@@ -187,10 +188,23 @@ def reset_pose_target_from_obs(arm_target: dict[str, float], obs: dict[str, Any]
         arm_target[k] = float(obs.get(k, arm_target.get(k, 0.0)))
 
 
+def hold_base_with_arm_pose(
+    robot: SpotRobot, arm_pose: dict[str, float], repeats: int, rate_hz: float
+) -> None:
+    """Send repeated zero-base + arm-pose commands to reinforce a reset move."""
+    steps = max(1, int(repeats))
+    sleep_s = 1.0 / max(1.0, rate_hz)
+    action = {"base.vx": 0.0, "base.vy": 0.0, "base.vyaw": 0.0, **arm_pose}
+    for _ in range(steps):
+        robot.send_action(action)
+        time.sleep(sleep_s)
+
+
 def update_state_from_keys(
     keys: list[str],
     state: TeleopState,
     arm_target: dict[str, float],
+    original_arm_pose: dict[str, float],
     obs: dict[str, Any],
     base_step_vx: float,
     base_step_vy: float,
@@ -243,6 +257,8 @@ def update_state_from_keys(
             apply_rpy_delta(arm_target, 0.0, 0.0, -arm_step_rpy)
         elif ch == "r":
             reset_pose_target_from_obs(arm_target, obs)
+        elif ch == "p":
+            arm_target.update(original_arm_pose)
         elif ch == "n":
             state.end_episode = True
         elif ch == "q":
@@ -258,9 +274,17 @@ def make_dataset(
     root: str | None,
     fps: int,
     use_videos: bool,
+    store_cameras: bool = True,
+    camera_shapes: dict[str, tuple[int, int, int]] | None = None,
     resume: bool = False,
 ) -> LeRobotDataset:
     teleop_action_processor, _, robot_observation_processor = make_default_processors()
+    obs_features = dict(robot.observation_features)
+    if store_cameras and camera_shapes:
+        for key, shape in camera_shapes.items():
+            if key in obs_features and isinstance(obs_features[key], tuple):
+                obs_features[key] = shape
+
     features = combine_feature_dicts(
         aggregate_pipeline_dataset_features(
             pipeline=teleop_action_processor,
@@ -269,10 +293,18 @@ def make_dataset(
         ),
         aggregate_pipeline_dataset_features(
             pipeline=robot_observation_processor,
-            initial_features=create_initial_features(observation=robot.observation_features),
+            initial_features=create_initial_features(observation=obs_features),
             use_videos=use_videos,
         ),
     )
+    if store_cameras and not use_videos:
+        # Keep camera frames as image features when video encoding is disabled.
+        camera_features = {k: v for k, v in obs_features.items() if isinstance(v, tuple)}
+        if camera_features:
+            features = combine_feature_dicts(
+                features,
+                hw_to_dataset_features(camera_features, OBS_STR, use_video=False),
+            )
     resolved_root: Path | None = None
     if root is not None:
         base = Path(root).expanduser()
@@ -335,7 +367,13 @@ def parse_args() -> argparse.Namespace:
         help="Parent directory for datasets. Final path becomes <dataset-root>/<repo-id>.",
     )
     p.add_argument("--resume", action="store_true", help="Append episodes to an existing dataset.")
-    p.add_argument("--video", action="store_true", help="Store image features as videos")
+    p.add_argument("--video", action="store_true", help="Store camera frames as encoded videos")
+    p.add_argument(
+        "--store-cameras",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Store camera frames in dataset (as videos with --video, otherwise as images).",
+    )
 
     p.add_argument("--base-step-vx", type=float, default=0.05)
     p.add_argument("--base-step-vy", type=float, default=0.05)
@@ -369,6 +407,15 @@ def main() -> None:
     print("Connecting to Spot...")
     robot.connect()
     print(f"Connected={robot.is_connected} calibrated={robot.is_calibrated}")
+    startup_obs = robot.get_observation()
+    camera_shapes: dict[str, tuple[int, int, int]] = {}
+    for key, spec in robot.observation_features.items():
+        if not isinstance(spec, tuple):
+            continue
+        value = startup_obs.get(key)
+        shape = getattr(value, "shape", None)
+        if shape is not None and len(shape) == 3:
+            camera_shapes[key] = (int(shape[0]), int(shape[1]), int(shape[2]))
 
     dataset = make_dataset(
         robot=robot,
@@ -376,9 +423,12 @@ def main() -> None:
         root=args.dataset_root,
         fps=args.fps,
         use_videos=args.video,
+        store_cameras=args.store_cameras,
+        camera_shapes=camera_shapes,
         resume=args.resume,
     )
     print(f"Dataset root: {dataset.root}")
+    print(f"Camera storage: {'video' if args.video and args.store_cameras else ('image' if args.store_cameras else 'disabled')}")
 
     state = TeleopState()
     loop_dt = 1.0 / float(args.fps)
@@ -387,6 +437,8 @@ def main() -> None:
     print_help()
 
     try:
+        original_arm_pose = {k: float(startup_obs.get(k, 0.0)) for k in POSE_KEYS}
+
         with raw_stdin():
             for ep in range(args.num_episodes):
                 if state.quit_all:
@@ -413,6 +465,7 @@ def main() -> None:
                             keys=keys,
                             state=state,
                             arm_target=arm_target,
+                            original_arm_pose=original_arm_pose,
                             obs=obs,
                             base_step_vx=args.base_step_vx,
                             base_step_vy=args.base_step_vy,
@@ -491,6 +544,14 @@ def main() -> None:
                 is_last_requested = ep >= args.num_episodes - 1
                 if state.quit_all or is_last_requested:
                     continue
+
+                print("Resetting arm to original startup pose...")
+                hold_base_with_arm_pose(
+                    robot=robot,
+                    arm_pose=original_arm_pose,
+                    repeats=10,
+                    rate_hz=float(args.fps),
+                )
 
                 if args.manual_reset:
                     if not wait_for_manual_reset():
