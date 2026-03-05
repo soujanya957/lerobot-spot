@@ -549,7 +549,7 @@ def main() -> None:
                 hold_base_with_arm_pose(
                     robot=robot,
                     arm_pose=original_arm_pose,
-                    repeats=10,
+                    repeats=50,
                     rate_hz=float(args.fps),
                 )
 
