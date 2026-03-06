@@ -5,5 +5,7 @@ Summary: LeRobot Plugin: Boston Dynamics Spot Robot
 Requires-Dist: lerobot>=0.4.4
 Requires-Dist: bosdyn_client
 Requires-Dist: bosdyn_api
+Requires-Dist: opencv-python
+Requires-Dist: numpy
 Provides-Extra: dev
 Requires-Dist: ipython; extra == "dev"

@@ -43,7 +43,11 @@ from bosdyn.client.robot_command import (
 from bosdyn.client.robot_state import RobotStateClient
 from lerobot.robots import Robot
 
-from .config_spot_robot import SpotRobotConfig
+import logging
+
+from .config_spot_robot import DualSpotRobotConfig, SpotRobotConfig
+
+logger = logging.getLogger(__name__)
 
 
 class SpotRobot(Robot):
@@ -241,8 +245,14 @@ class SpotRobot(Robot):
 
     @property
     def _camera_ft(self) -> Dict[str, Tuple[int, int, int]]:
-        # Heights/widths are unknown until first image; use None as placeholder.
-        return {src: (None, None, 3) for src in self._image_sources}
+        features: Dict[str, Any] = {}
+        for src in self._image_sources:
+            if self._is_depth_source(src):
+                # Depth images: (H, W) float32 (meters); dimensions unknown until first frame.
+                features[src] = (None, None)
+            else:
+                features[src] = (None, None, 3)
+        return features
 
     @property
     def observation_features(self) -> Dict[str, Any]:
@@ -279,8 +289,9 @@ class SpotRobot(Robot):
 
         If SpotRobotConfig.image_sources is non-empty, use it as-is.
         Otherwise derive from high-level flags:
-            use_front_cameras: front stereo pair
-            use_arm_camera:    arm/hand camera
+            use_front_cameras:    front stereo pair
+            use_arm_camera:       arm/hand camera
+            use_depth_cameras:    EAP RealSense depth cameras
 
         IMPORTANT: Verify source names with ImageClient.list_image_sources().
         """
@@ -292,7 +303,18 @@ class SpotRobot(Robot):
             sources.extend(["frontleft_fisheye", "frontright_fisheye"])
         if self.config.use_arm_camera:
             sources.append("hand_color")
+        if self.config.use_depth_cameras:
+            sources.extend([
+                "hand_depth_in_hand_color_frame",  # RealSense depth aligned to hand color
+                "frontleft_depth",                 # Front-left depth
+                "frontright_depth",                # Front-right depth
+            ])
         return sources
+
+    @staticmethod
+    def _is_depth_source(source_name: str) -> bool:
+        """Return True if the image source delivers depth data."""
+        return "_depth" in source_name
 
     # ------------------------------------------------------------------
     # Helpers: base state, arm state, images
@@ -382,63 +404,80 @@ class SpotRobot(Robot):
         """
         Fetch images from Spot's onboard cameras.
 
-        Spot often returns JPEG-compressed data even when RGB_U8 is requested
-        (especially for fisheye and hand cameras). This method handles both:
-          - FORMAT_JPEG / any compressed format: decoded with cv2.imdecode
-          - FORMAT_RAW with PIXEL_FORMAT_RGB_U8: reshaped directly
-          - FORMAT_RAW with PIXEL_FORMAT_GREYSCALE_U8: converted to 3-channel
+        Handles color and depth sources:
+          Color sources:
+            - FORMAT_JPEG: decoded with cv2.imdecode → (H, W, 3) uint8 RGB
+            - FORMAT_RAW / PIXEL_FORMAT_GREYSCALE_U8: converted to 3-channel
+            - FORMAT_RAW / PIXEL_FORMAT_RGB_U8: reshaped directly
+          Depth sources (source name contains '_depth'):
+            - PIXEL_FORMAT_DEPTH_MAP: 16-bit uint (mm) → (H, W) float32 (meters)
 
         Returns:
-            dict mapping image_source_name -> np.ndarray(H, W, 3), uint8.
+            dict mapping image_source_name -> np.ndarray.
         """
         if self._image_client is None:
             raise ConnectionError("ImageClient not initialized.")
 
         import cv2
 
+        color_sources = [s for s in self._image_sources if not self._is_depth_source(s)]
+        depth_sources = [s for s in self._image_sources if self._is_depth_source(s)]
+
         requests: List[image_pb2.ImageRequest] = []
-        for src in self._image_sources:
+        for src in color_sources:
             req = image_pb2.ImageRequest()
             req.image_source_name = src
-            # Request RGB8 — Spot may still return JPEG-compressed bytes.
             req.pixel_format = image_pb2.Image.PIXEL_FORMAT_RGB_U8
             requests.append(req)
+        for src in depth_sources:
+            req = image_pb2.ImageRequest()
+            req.image_source_name = src
+            req.pixel_format = image_pb2.Image.PIXEL_FORMAT_DEPTH_MAP
+            requests.append(req)
+
+        if not requests:
+            return {}
 
         responses = self._image_client.get_image(requests)
         images: Dict[str, np.ndarray] = {}
 
         for resp in responses:
+            src_name = resp.source.name
             img_proto = resp.shot.image
             h = img_proto.rows
             w = img_proto.cols
+
+            # ---- Depth -------------------------------------------------------
+            if self._is_depth_source(src_name):
+                raw = np.frombuffer(img_proto.data, dtype=np.uint16)
+                if h > 0 and w > 0 and raw.size == h * w:
+                    # Convert mm → meters as float32
+                    images[src_name] = (raw.reshape((h, w)).astype(np.float32) / 1000.0)
+                continue
+
+            # ---- Color -------------------------------------------------------
             data = np.frombuffer(img_proto.data, dtype=np.uint8)
 
-            # ---- JPEG / compressed (format == FORMAT_JPEG) ----------------
-            # Check image format (the encoding), not pixel_format (the layout).
+            # JPEG / compressed
             if img_proto.format == image_pb2.Image.FORMAT_JPEG:
                 bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
                 if bgr is None:
                     continue
-                # cv2 decodes to BGR; convert to RGB to stay consistent.
-                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-                images[resp.source.name] = rgb
+                images[src_name] = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
                 continue
 
-            # ---- Raw greyscale --------------------------------------------
+            # Raw greyscale
             if img_proto.pixel_format == image_pb2.Image.PIXEL_FORMAT_GREYSCALE_U8:
                 if h <= 0 or w <= 0 or data.size != h * w:
                     continue
-                grey = data.reshape((h, w))
-                rgb  = cv2.cvtColor(grey, cv2.COLOR_GRAY2RGB)
-                images[resp.source.name] = rgb
+                images[src_name] = cv2.cvtColor(data.reshape((h, w)), cv2.COLOR_GRAY2RGB)
                 continue
 
-            # ---- Raw RGB --------------------------------------------------
+            # Raw RGB
             if img_proto.pixel_format == image_pb2.Image.PIXEL_FORMAT_RGB_U8:
-                expected = h * w * 3
-                if h <= 0 or w <= 0 or data.size != expected:
+                if h <= 0 or w <= 0 or data.size != h * w * 3:
                     continue
-                images[resp.source.name] = data.reshape((h, w, 3))
+                images[src_name] = data.reshape((h, w, 3))
                 continue
 
             # Unknown format — skip silently.
@@ -600,3 +639,111 @@ class SpotRobot(Robot):
         }
 
         return sent_action
+
+
+class DualSpotRobot(Robot):
+    """
+    Controls two Spot robots in parallel with a single teleop controller.
+
+    The same action is broadcast to both robots on every `send_action` call.
+    Observations from each robot are returned under prefixed keys
+    (``robot1.<key>`` and ``robot2.<key>``).
+    """
+
+    config_class = DualSpotRobotConfig
+    name = "dual_spot_robot"
+
+    def __init__(self, config: DualSpotRobotConfig):
+        super().__init__(config)
+        self._robot1 = SpotRobot(config.robot1)
+        self._robot2 = SpotRobot(config.robot2)
+
+    # ------------------------------------------------------------------
+    # Connection lifecycle
+    # ------------------------------------------------------------------
+
+    @property
+    def is_connected(self) -> bool:
+        return self._robot1.is_connected and self._robot2.is_connected
+
+    def connect(self, calibrate: bool = True) -> None:
+        self._robot1.connect(calibrate=calibrate)
+        try:
+            self._robot2.connect(calibrate=calibrate)
+        except Exception:
+            self._robot1.disconnect()
+            raise
+
+    def disconnect(self) -> None:
+        errs = []
+        for robot in [self._robot1, self._robot2]:
+            try:
+                robot.disconnect()
+            except Exception as e:
+                errs.append(e)
+        if errs:
+            raise errs[0]
+
+    def disconnect_keep_powered(self) -> None:
+        for robot in [self._robot1, self._robot2]:
+            robot.disconnect_keep_powered()
+
+    # ------------------------------------------------------------------
+    # Calibration / configuration (delegated)
+    # ------------------------------------------------------------------
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self._robot1.is_calibrated and self._robot2.is_calibrated
+
+    def calibrate(self) -> None:
+        self._robot1.calibrate()
+        self._robot2.calibrate()
+
+    def configure(self) -> None:
+        self._robot1.configure()
+        self._robot2.configure()
+
+    # ------------------------------------------------------------------
+    # Feature specification
+    # ------------------------------------------------------------------
+
+    @property
+    def observation_features(self) -> Dict[str, Any]:
+        """Prefix robot1/robot2 onto each robot's observation features."""
+        features: Dict[str, Any] = {}
+        for prefix, robot in [("robot1", self._robot1), ("robot2", self._robot2)]:
+            for k, v in robot.observation_features.items():
+                features[f"{prefix}.{k}"] = v
+        return features
+
+    @property
+    def action_features(self) -> Dict[str, Any]:
+        """Actions are shared; use robot1's action features."""
+        return self._robot1.action_features
+
+    # ------------------------------------------------------------------
+    # Observations & actions
+    # ------------------------------------------------------------------
+
+    def get_observation(self) -> Dict[str, Any]:
+        obs1 = self._robot1.get_observation()
+        obs2 = self._robot2.get_observation()
+        return {
+            **{f"robot1.{k}": v for k, v in obs1.items()},
+            **{f"robot2.{k}": v for k, v in obs2.items()},
+        }
+
+    def send_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        """Broadcast the same action to both robots. Returns robot1's clamped action."""
+        sent1 = self._robot1.send_action(action)
+        try:
+            self._robot2.send_action(action)
+        except Exception as e:
+            logger.error("robot2 send_action failed: %s — stopping both robots.", e)
+            try:
+                self.disconnect()
+            except Exception:
+                pass
+            raise
+        return sent1

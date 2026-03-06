@@ -51,7 +51,7 @@ from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts, h
 from lerobot.processor import make_default_processors
 from lerobot.utils.constants import ACTION, OBS_STR
 
-from lerobot_robot_spot import SpotRobot, SpotRobotConfig
+from lerobot_robot_spot import DualSpotRobot, DualSpotRobotConfig, SpotRobot, SpotRobotConfig
 
 POSE_KEYS = (
     "arm.pose.x",
@@ -189,7 +189,7 @@ def reset_pose_target_from_obs(arm_target: dict[str, float], obs: dict[str, Any]
 
 
 def hold_base_with_arm_pose(
-    robot: SpotRobot, arm_pose: dict[str, float], repeats: int, rate_hz: float
+    robot: SpotRobot | DualSpotRobot, arm_pose: dict[str, float], repeats: int, rate_hz: float
 ) -> None:
     """Send repeated zero-base + arm-pose commands to reinforce a reset move."""
     steps = max(1, int(repeats))
@@ -336,6 +336,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--hostname", required=True)
     p.add_argument("--username", required=True)
     p.add_argument("--password", required=True)
+    # Dual-robot mode: provide hostname2 to drive a second Spot in lockstep.
+    p.add_argument("--hostname2", default="", help="Hostname of second Spot. Enables dual-robot mode.")
+    p.add_argument("--username2", default="admin", help="Username for second Spot.")
+    p.add_argument("--password2", default="password", help="Password for second Spot.")
+    p.add_argument(
+        "--use-depth-cameras",
+        action="store_true",
+        help="Enable EAP (Intel RealSense) hand depth cameras on the robot(s).",
+    )
     p.add_argument(
         "--image-sources",
         nargs="+",
@@ -394,15 +403,31 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    cfg = SpotRobotConfig(
+    robot1_cfg = SpotRobotConfig(
         hostname=args.hostname,
         username=args.username,
         password=args.password,
         image_sources=args.image_sources,
         image_width=args.image_width,
         image_height=args.image_height,
+        use_depth_cameras=args.use_depth_cameras,
     )
-    robot = SpotRobot(cfg)
+
+    if args.hostname2:
+        robot2_cfg = SpotRobotConfig(
+            hostname=args.hostname2,
+            username=args.username2,
+            password=args.password2,
+            image_sources=args.image_sources,
+            image_width=args.image_width,
+            image_height=args.image_height,
+            use_depth_cameras=args.use_depth_cameras,
+        )
+        cfg = DualSpotRobotConfig(robot1=robot1_cfg, robot2=robot2_cfg)
+        robot = DualSpotRobot(cfg)
+        print(f"Dual-robot mode: robot1={args.hostname}, robot2={args.hostname2}")
+    else:
+        robot = SpotRobot(robot1_cfg)
 
     print("Connecting to Spot...")
     robot.connect()

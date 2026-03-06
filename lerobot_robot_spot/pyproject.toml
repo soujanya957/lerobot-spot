@@ -10,6 +10,8 @@ dependencies = [
   "lerobot>=0.4.4",
   "bosdyn_client",
   "bosdyn_api",
+  "opencv-python",
+  "numpy",
 ]
 
 

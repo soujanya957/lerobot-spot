@@ -41,7 +41,16 @@ class SpotRobotConfig(RobotConfig):
     image_width: int = 0   # 0 => keep native width
     image_height: int = 0  # 0 => keep native height
 
+    # Enable EAP (Enhanced Vision Package) hand depth cameras (Intel RealSense).
+    use_depth_cameras: bool = False
+
     # You can add more config fields later (e.g. max velocities, arm limits).
     extra: Dict[str, float] = field(default_factory=dict)
 
 
+@RobotConfig.register_subclass("dual_spot_robot")
+@dataclass
+class DualSpotRobotConfig(RobotConfig):
+    """Configuration for two Spot robots controlled in parallel."""
+    robot1: SpotRobotConfig = field(default_factory=SpotRobotConfig)
+    robot2: SpotRobotConfig = field(default_factory=SpotRobotConfig)

@@ -1,4 +1,4 @@
-from .config_spot_robot import SpotRobotConfig 
-from .spot_robot import SpotRobot 
+from .config_spot_robot import DualSpotRobotConfig, SpotRobotConfig
+from .spot_robot import DualSpotRobot, SpotRobot
 
-__all__ = ["SpotRobotConfig", "SpotRobot"]
+__all__ = ["SpotRobotConfig", "SpotRobot", "DualSpotRobotConfig", "DualSpotRobot"]
