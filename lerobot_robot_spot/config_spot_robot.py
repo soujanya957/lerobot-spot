@@ -44,6 +44,17 @@ class SpotRobotConfig(RobotConfig):
     # Enable EAP (Enhanced Vision Package) hand depth cameras (Intel RealSense).
     use_depth_cameras: bool = False
 
+    # Back and side fisheye cameras (standard Spot)
+    use_back_camera: bool = True      # back_fisheye
+    use_side_cameras: bool = True     # left_fisheye + right_fisheye
+
+    # Proprioceptive sensor groups (all on by default)
+    include_joint_states: bool = True        # 19 joints × (pos, vel, acc, load)
+    include_foot_states: bool = True         # 4 feet × (contact, pos_x/y/z, friction_mu)
+    include_manipulator_state: bool = True   # gripper %, holding, stow, wrench force/torque
+    include_power_state: bool = True         # battery charge %, voltage, current, runtime
+    include_body_velocity_odom: bool = True  # body vel in odom frame (IMU proxy)
+
     # You can add more config fields later (e.g. max velocities, arm limits).
     extra: Dict[str, float] = field(default_factory=dict)
 

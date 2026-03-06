@@ -88,6 +88,9 @@ class SpotRobot(Robot):
         # Dummy calibration container for compatibility with LeRobot.
         self.calibration: Dict[str, Any] = {}
 
+        # Joint names discovered after connect(); used for observation_features.
+        self._joint_names: List[str] = []
+
         # Determine which Spot image sources to use (front pair + arm).
         self._image_sources: List[str] = self._build_image_source_list()
 
@@ -142,6 +145,10 @@ class SpotRobot(Robot):
         self._lease = self._lease_client.acquire()
         self._robot.power_on(timeout_sec=30)
         blocking_stand(self._command_client, timeout_sec=15)
+
+        # Discover joint names for observation_features
+        _probe = self._state_client.get_robot_state()
+        self._joint_names = [js.name for js in _probe.kinematic_state.joint_states]
 
         # 4) Calibration / configuration hooks for compatibility
         if calibrate:
@@ -222,7 +229,7 @@ class SpotRobot(Robot):
 
     @property
     def _base_ft(self) -> Dict[str, type]:
-        return {
+        ft: Dict[str, Any] = {
             "base.pos_x":   float,
             "base.pos_y":   float,
             "base.yaw":     float,
@@ -230,6 +237,16 @@ class SpotRobot(Robot):
             "base.vel_y":   float,
             "base.vel_yaw": float,
         }
+        if self.config.include_body_velocity_odom:
+            ft.update({
+                "base.odom_vel_x":    float,
+                "base.odom_vel_y":    float,
+                "base.odom_vel_z":    float,
+                "base.odom_angvel_x": float,
+                "base.odom_angvel_y": float,
+                "base.odom_angvel_z": float,
+            })
+        return ft
 
     @property
     def _arm_pose_ft(self) -> Dict[str, type]:
@@ -255,8 +272,56 @@ class SpotRobot(Robot):
         return features
 
     @property
+    def _joint_ft(self) -> Dict[str, type]:
+        if not self.config.include_joint_states:
+            return {}
+        ft: Dict[str, type] = {}
+        for name in self._joint_names:
+            n = name.replace(".", "_")
+            for suffix in ("pos", "vel", "acc", "load"):
+                ft[f"joint.{n}.{suffix}"] = float
+        return ft
+
+    @property
+    def _foot_ft(self) -> Dict[str, type]:
+        if not self.config.include_foot_states:
+            return {}
+        return {
+            f"foot.{i}.{k}": float
+            for i in range(4)
+            for k in ("contact", "pos_x", "pos_y", "pos_z", "friction_mu")
+        }
+
+    @property
+    def _manipulator_ft(self) -> Dict[str, type]:
+        if not self.config.include_manipulator_state:
+            return {}
+        return {k: float for k in (
+            "gripper.open_pct", "gripper.holding", "arm.stow_state",
+            "arm.wrench.force_x", "arm.wrench.force_y", "arm.wrench.force_z",
+            "arm.wrench.torque_x", "arm.wrench.torque_y", "arm.wrench.torque_z",
+        )}
+
+    @property
+    def _power_ft(self) -> Dict[str, type]:
+        if not self.config.include_power_state:
+            return {}
+        return {k: float for k in (
+            "power.charge_pct", "power.estimated_runtime_s",
+            "power.voltage_v", "power.current_a",
+        )}
+
+    @property
     def observation_features(self) -> Dict[str, Any]:
-        return {**self._base_ft, **self._arm_pose_ft, **self._camera_ft}
+        return {
+            **self._base_ft,
+            **self._arm_pose_ft,
+            **self._joint_ft,
+            **self._foot_ft,
+            **self._manipulator_ft,
+            **self._power_ft,
+            **self._camera_ft,
+        }
 
     # FIX 1: Added missing @property decorator — without it action_features()
     # must be called as a method, which breaks the LeRobot interface that
@@ -303,6 +368,10 @@ class SpotRobot(Robot):
             sources.extend(["frontleft_fisheye", "frontright_fisheye"])
         if self.config.use_arm_camera:
             sources.append("hand_color")
+        if self.config.use_back_camera:
+            sources.append("back_fisheye")
+        if self.config.use_side_cameras:
+            sources.extend(["left_fisheye", "right_fisheye"])
         if self.config.use_depth_cameras:
             sources.extend([
                 "hand_depth_in_hand_color_frame",  # RealSense depth aligned to hand color
@@ -320,7 +389,7 @@ class SpotRobot(Robot):
     # Helpers: base state, arm state, images
     # ------------------------------------------------------------------
 
-    def _get_base_state(self) -> Dict[str, float]:
+    def _get_base_state(self, state=None) -> Dict[str, float]:
         """
         Read base pose and velocity from RobotState.
 
@@ -330,7 +399,8 @@ class SpotRobot(Robot):
         if self._state_client is None:
             raise ConnectionError("RobotStateClient not initialized.")
 
-        state = self._state_client.get_robot_state()
+        if state is None:
+            state = self._state_client.get_robot_state()
         kin = state.kinematic_state
         tf = kin.transforms_snapshot
 
@@ -358,7 +428,7 @@ class SpotRobot(Robot):
             vel_y   = vel.linear.y
             vel_yaw = vel.angular.z
 
-        return {
+        result: Dict[str, float] = {
             "base.pos_x":   float(pos_x),
             "base.pos_y":   float(pos_y),
             "base.yaw":     float(yaw),
@@ -367,12 +437,29 @@ class SpotRobot(Robot):
             "base.vel_yaw": float(vel_yaw),
         }
 
-    def _get_hand_pose(self) -> Dict[str, float]:
+        if self.config.include_body_velocity_odom:
+            odom_vel = kin.velocity_of_body_in_odom
+            if odom_vel is not None:
+                result["base.odom_vel_x"]    = float(odom_vel.linear.x)
+                result["base.odom_vel_y"]    = float(odom_vel.linear.y)
+                result["base.odom_vel_z"]    = float(odom_vel.linear.z)
+                result["base.odom_angvel_x"] = float(odom_vel.angular.x)
+                result["base.odom_angvel_y"] = float(odom_vel.angular.y)
+                result["base.odom_angvel_z"] = float(odom_vel.angular.z)
+            else:
+                for k in ("base.odom_vel_x", "base.odom_vel_y", "base.odom_vel_z",
+                          "base.odom_angvel_x", "base.odom_angvel_y", "base.odom_angvel_z"):
+                    result[k] = 0.0
+
+        return result
+
+    def _get_hand_pose(self, state=None) -> Dict[str, float]:
         """Read current hand pose in body frame from RobotState transforms."""
         if self._state_client is None:
             raise ConnectionError("RobotStateClient not initialized.")
 
-        state = self._state_client.get_robot_state()
+        if state is None:
+            state = self._state_client.get_robot_state()
         body_tform_hand = get_a_tform_b(
             state.kinematic_state.transforms_snapshot,
             BODY_FRAME_NAME,
@@ -398,6 +485,55 @@ class SpotRobot(Robot):
             "arm.pose.qx": float(body_tform_hand.rot.x),
             "arm.pose.qy": float(body_tform_hand.rot.y),
             "arm.pose.qz": float(body_tform_hand.rot.z),
+        }
+
+    def _get_joint_states(self, state) -> Dict[str, float]:
+        """Extract per-joint position, velocity, acceleration, and load."""
+        obs: Dict[str, float] = {}
+        for js in state.kinematic_state.joint_states:
+            n = js.name.replace(".", "_")
+            obs[f"joint.{n}.pos"]  = float(js.position.value)     if js.HasField("position")     else 0.0
+            obs[f"joint.{n}.vel"]  = float(js.velocity.value)     if js.HasField("velocity")     else 0.0
+            obs[f"joint.{n}.acc"]  = float(js.acceleration.value) if js.HasField("acceleration") else 0.0
+            obs[f"joint.{n}.load"] = float(js.load.value)         if js.HasField("load")         else 0.0
+        return obs
+
+    def _get_foot_states(self, state) -> Dict[str, float]:
+        """Extract foot contact, body-relative position, and terrain friction estimate."""
+        obs: Dict[str, float] = {}
+        for i, fs in enumerate(state.foot_state):
+            obs[f"foot.{i}.contact"]     = float(fs.contact)
+            obs[f"foot.{i}.pos_x"]       = float(fs.foot_position_rt_body.x)
+            obs[f"foot.{i}.pos_y"]       = float(fs.foot_position_rt_body.y)
+            obs[f"foot.{i}.pos_z"]       = float(fs.foot_position_rt_body.z)
+            obs[f"foot.{i}.friction_mu"] = float(fs.terrain.ground_mu_est)
+        return obs
+
+    def _get_manipulator_state(self, state) -> Dict[str, float]:
+        """Extract gripper and end-effector wrench state."""
+        ms = state.manipulator_state
+        w = ms.estimated_end_effector_wrench_in_end_effector
+        return {
+            "gripper.open_pct":    float(ms.gripper_open_percentage),
+            "gripper.holding":     float(ms.is_gripper_holding_item),
+            "arm.stow_state":      float(ms.stow_state),
+            "arm.wrench.force_x":  float(w.force.x),
+            "arm.wrench.force_y":  float(w.force.y),
+            "arm.wrench.force_z":  float(w.force.z),
+            "arm.wrench.torque_x": float(w.torque.x),
+            "arm.wrench.torque_y": float(w.torque.y),
+            "arm.wrench.torque_z": float(w.torque.z),
+        }
+
+    def _get_power_state(self, state) -> Dict[str, float]:
+        """Extract battery charge, voltage, current, and estimated runtime."""
+        ps = state.power_state
+        bs = state.battery_states[0] if state.battery_states else None
+        return {
+            "power.charge_pct":          float(ps.locomotion_charge_percentage.value)   if ps.HasField("locomotion_charge_percentage")  else 0.0,
+            "power.estimated_runtime_s": float(ps.locomotion_estimated_runtime.seconds)  if ps.HasField("locomotion_estimated_runtime")   else 0.0,
+            "power.voltage_v":           float(bs.voltage.value)  if (bs and bs.HasField("voltage"))  else 0.0,
+            "power.current_a":           float(bs.current.value)  if (bs and bs.HasField("current"))  else 0.0,
         }
 
     def _get_images(self) -> Dict[str, np.ndarray]:
@@ -492,16 +628,26 @@ class SpotRobot(Robot):
         """
         Collect one observation from Spot.
 
-        Includes base pose/velocity, arm pose, and camera images.
+        Uses a single get_robot_state() call and passes it to all extractors.
+        Includes base pose/velocity, arm pose, proprioceptive sensors, and camera images.
         """
         if not self.is_connected:
             raise ConnectionError(f"{self} is not connected.")
 
+        state = self._state_client.get_robot_state()   # single RPC call
         obs: Dict[str, Any] = {}
 
-        obs.update(self._get_base_state())
+        obs.update(self._get_base_state(state))
+        obs.update(self._get_hand_pose(state))
 
-        obs.update(self._get_hand_pose())
+        if self.config.include_joint_states and self._joint_names:
+            obs.update(self._get_joint_states(state))
+        if self.config.include_foot_states:
+            obs.update(self._get_foot_states(state))
+        if self.config.include_manipulator_state:
+            obs.update(self._get_manipulator_state(state))
+        if self.config.include_power_state:
+            obs.update(self._get_power_state(state))
 
         images = self._get_images()
         for src in self._image_sources:

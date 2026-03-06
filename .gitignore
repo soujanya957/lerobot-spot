@@ -11,3 +11,6 @@ data/
 .DS_Store
 .vscode/
 .idea/
+
+# Misc
+reminders.txt

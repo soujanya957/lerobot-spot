@@ -383,6 +383,20 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Store camera frames in dataset (as videos with --video, otherwise as images).",
     )
+    p.add_argument("--back-camera",        action=argparse.BooleanOptionalAction, default=True,
+                   help="Stream back fisheye camera.")
+    p.add_argument("--side-cameras",       action=argparse.BooleanOptionalAction, default=True,
+                   help="Stream left and right fisheye cameras.")
+    p.add_argument("--joint-states",       action=argparse.BooleanOptionalAction, default=True,
+                   help="Record all joint states (pos/vel/acc/load).")
+    p.add_argument("--foot-states",        action=argparse.BooleanOptionalAction, default=True,
+                   help="Record foot contact and position states.")
+    p.add_argument("--manipulator-state",  action=argparse.BooleanOptionalAction, default=True,
+                   help="Record gripper and end-effector wrench state.")
+    p.add_argument("--power-state",        action=argparse.BooleanOptionalAction, default=True,
+                   help="Record battery/power state.")
+    p.add_argument("--body-velocity-odom", action=argparse.BooleanOptionalAction, default=True,
+                   help="Record body velocity in odom frame (IMU proxy).")
 
     p.add_argument("--base-step-vx", type=float, default=0.05)
     p.add_argument("--base-step-vy", type=float, default=0.05)
@@ -411,6 +425,13 @@ def main() -> None:
         image_width=args.image_width,
         image_height=args.image_height,
         use_depth_cameras=args.use_depth_cameras,
+        use_back_camera=args.back_camera,
+        use_side_cameras=args.side_cameras,
+        include_joint_states=args.joint_states,
+        include_foot_states=args.foot_states,
+        include_manipulator_state=args.manipulator_state,
+        include_power_state=args.power_state,
+        include_body_velocity_odom=args.body_velocity_odom,
     )
 
     if args.hostname2:
@@ -422,6 +443,13 @@ def main() -> None:
             image_width=args.image_width,
             image_height=args.image_height,
             use_depth_cameras=args.use_depth_cameras,
+            use_back_camera=args.back_camera,
+            use_side_cameras=args.side_cameras,
+            include_joint_states=args.joint_states,
+            include_foot_states=args.foot_states,
+            include_manipulator_state=args.manipulator_state,
+            include_power_state=args.power_state,
+            include_body_velocity_odom=args.body_velocity_odom,
         )
         cfg = DualSpotRobotConfig(robot1=robot1_cfg, robot2=robot2_cfg)
         robot = DualSpotRobot(cfg)
@@ -439,8 +467,8 @@ def main() -> None:
             continue
         value = startup_obs.get(key)
         shape = getattr(value, "shape", None)
-        if shape is not None and len(shape) == 3:
-            camera_shapes[key] = (int(shape[0]), int(shape[1]), int(shape[2]))
+        if shape is not None and len(shape) >= 2:
+            camera_shapes[key] = tuple(int(s) for s in shape)
 
     dataset = make_dataset(
         robot=robot,
