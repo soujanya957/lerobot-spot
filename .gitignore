@@ -5,9 +5,12 @@ __pycache__/
 
 # Local data/artifacts
 data/
+
 *.log
 
 # OS/editor
 .DS_Store
 .vscode/
 .idea/
+
+commands.txt
