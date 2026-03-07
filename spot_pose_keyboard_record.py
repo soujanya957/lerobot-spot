@@ -25,9 +25,14 @@ Controls (press repeatedly, commands are incremental):
     r   : reset arm target to current observed pose
     p   : reset arm target to original startup pose
 
+  Gripper:
+    g   : open gripper (100%)
+    b   : half-open gripper (50%)
+    t   : close gripper (0%)
+
   Episode/session:
-    n : end current episode early and save it
-    q : quit after saving current episode
+    n : end current episode early (prompts save/discard)
+    q : quit (prompts save/discard for current episode)
     h : print help
 """
 
@@ -69,6 +74,7 @@ class TeleopState:
     vx: float = 0.0
     vy: float = 0.0
     vyaw: float = 0.0
+    gripper_pct: float = -1.0  # -1 = no command yet (backward compat), 0–100 = open percentage
     end_episode: bool = False
     quit_all: bool = False
 
@@ -157,6 +163,26 @@ def poll_keys() -> list[str]:
     return pressed
 
 
+def wait_for_save_or_discard() -> bool:
+    """Ask user whether to save or discard the just-finished episode.
+
+    Returns True if the episode should be saved, False to discard.
+    """
+    _ = poll_keys()
+    print("\nSave or discard this episode? [s=save / d=discard]: ", end="", flush=True)
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+        if not ready:
+            continue
+        ch = sys.stdin.read(1)
+        if ch.lower() == "s":
+            print("save")
+            return True
+        if ch.lower() == "d":
+            print("discard")
+            return False
+
+
 def wait_for_manual_reset() -> bool:
     """Wait until Enter to continue; return False if user chooses to quit."""
     # Drain buffered keys from teleop loop first.
@@ -179,8 +205,9 @@ def print_help() -> None:
     print("  base: w/s vx, z/c vy, a/d vyaw, <space> stop base")
     print("  pos : u/j x, i/k y, o/l z")
     print("  rot : 7/4 roll, 8/5 pitch, 9/6 yaw")
+    print("  grip: g open(100%), b half(50%), t close(0%)")
     print("  arm : r reset target to current observed hand pose, p reset to startup pose")
-    print("  run : n end episode, q quit, h help")
+    print("  run : n end episode (prompts save/discard), q quit, h help")
 
 
 def reset_pose_target_from_obs(arm_target: dict[str, float], obs: dict[str, Any]) -> None:
@@ -255,6 +282,12 @@ def update_state_from_keys(
             apply_rpy_delta(arm_target, 0.0, 0.0, +arm_step_rpy)
         elif ch == "6":
             apply_rpy_delta(arm_target, 0.0, 0.0, -arm_step_rpy)
+        elif ch == "g":
+            state.gripper_pct = 100.0
+        elif ch == "b":
+            state.gripper_pct = 50.0
+        elif ch == "t":
+            state.gripper_pct = 0.0
         elif ch == "r":
             reset_pose_target_from_obs(arm_target, obs)
         elif ch == "p":
@@ -440,11 +473,12 @@ def main() -> None:
         original_arm_pose = {k: float(startup_obs.get(k, 0.0)) for k in POSE_KEYS}
 
         with raw_stdin():
-            for ep in range(args.num_episodes):
+            saved_episodes = 0
+            while saved_episodes < args.num_episodes:
                 if state.quit_all:
                     break
 
-                print(f"\nEpisode {ep + 1}/{args.num_episodes} start")
+                print(f"\nEpisode {saved_episodes + 1}/{args.num_episodes} start")
                 episode_t0 = time.perf_counter()
                 next_tick = episode_t0
                 status_t = 0.0
@@ -483,6 +517,7 @@ def main() -> None:
                         "base.vy": state.vy,
                         "base.vyaw": state.vyaw,
                         **arm_target,
+                        "arm.gripper_open_percentage": state.gripper_pct,
                     }
                     sent = robot.send_action(action)
 
@@ -503,6 +538,7 @@ def main() -> None:
                         obs_qx = float(obs.get("arm.pose.qx", 0.0))
                         obs_qy = float(obs.get("arm.pose.qy", 0.0))
                         obs_qz = float(obs.get("arm.pose.qz", 0.0))
+                        obs_grip = float(obs.get("arm.gripper_open_percentage", 0.0))
                         tgt_x = float(arm_target.get("arm.pose.x", 0.0))
                         tgt_y = float(arm_target.get("arm.pose.y", 0.0))
                         tgt_z = float(arm_target.get("arm.pose.z", 0.0))
@@ -510,10 +546,12 @@ def main() -> None:
                         tgt_qx = float(arm_target.get("arm.pose.qx", 0.0))
                         tgt_qy = float(arm_target.get("arm.pose.qy", 0.0))
                         tgt_qz = float(arm_target.get("arm.pose.qz", 0.0))
+                        grip_str = f"{state.gripper_pct:.0f}%" if state.gripper_pct >= 0.0 else "—"
                         print(
                             f"\r vx={state.vx:+.2f} vy={state.vy:+.2f} vyaw={state.vyaw:+.2f} "
                             f"ee_xyz=({obs_x:+.3f},{obs_y:+.3f},{obs_z:+.3f}) "
                             f"ee_quat=({obs_qw:+.3f},{obs_qx:+.3f},{obs_qy:+.3f},{obs_qz:+.3f}) "
+                            f"grip=obs:{obs_grip:.0f}%/cmd:{grip_str} "
                             f"target_xyz=({tgt_x:+.3f},{tgt_y:+.3f},{tgt_z:+.3f}) "
                             f"target_quat=({tgt_qw:+.3f},{tgt_qx:+.3f},{tgt_qy:+.3f},{tgt_qz:+.3f}) "
                             f"frames={dataset.episode_buffer['size']}",
@@ -537,13 +575,24 @@ def main() -> None:
                     }
                 )
 
-                print("\nSaving episode...")
-                dataset.save_episode()
-                print(f"Saved. total_episodes={dataset.num_episodes} total_frames={dataset.num_frames}")
+                if wait_for_save_or_discard():
+                    print("Saving episode...")
+                    dataset.save_episode()
+                    saved_episodes += 1
+                    print(f"Saved. total_episodes={dataset.num_episodes} total_frames={dataset.num_frames}")
+                else:
+                    dataset.clear_episode_buffer()
+                    print("Episode discarded.")
 
-                is_last_requested = ep >= args.num_episodes - 1
-                if state.quit_all or is_last_requested:
+                if state.quit_all or saved_episodes >= args.num_episodes:
                     continue
+
+                print("Opening gripper before reset...")
+                robot.send_action(
+                    {"base.vx": 0.0, "base.vy": 0.0, "base.vyaw": 0.0,
+                     **arm_target, "arm.gripper_open_percentage": 100.0}
+                )
+                time.sleep(1.0)
 
                 print("Resetting arm to original startup pose...")
                 hold_base_with_arm_pose(
@@ -552,6 +601,14 @@ def main() -> None:
                     repeats=50,
                     rate_hz=float(args.fps),
                 )
+
+                print("Closing gripper after reset...")
+                robot.send_action(
+                    {"base.vx": 0.0, "base.vy": 0.0, "base.vyaw": 0.0,
+                     **original_arm_pose, "arm.gripper_open_percentage": 0.0}
+                )
+                time.sleep(1.0)
+                state.gripper_pct = 0.0
 
                 if args.manual_reset:
                     if not wait_for_manual_reset():

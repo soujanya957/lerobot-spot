@@ -245,8 +245,12 @@ class SpotRobot(Robot):
         return {src: (None, None, 3) for src in self._image_sources}
 
     @property
+    def _gripper_ft(self) -> Dict[str, type]:
+        return {"arm.gripper_open_percentage": float}
+
+    @property
     def observation_features(self) -> Dict[str, Any]:
-        return {**self._base_ft, **self._arm_pose_ft, **self._camera_ft}
+        return {**self._base_ft, **self._arm_pose_ft, **self._gripper_ft, **self._camera_ft}
 
     # FIX 1: Added missing @property decorator — without it action_features()
     # must be called as a method, which breaks the LeRobot interface that
@@ -267,7 +271,7 @@ class SpotRobot(Robot):
             "base.vy":   float,
             "base.vyaw": float,
         }
-        return {**base_action, **self._arm_pose_ft}
+        return {**base_action, **self._arm_pose_ft, "arm.gripper_open_percentage": float}
 
     # ------------------------------------------------------------------
     # Image sources
@@ -378,6 +382,16 @@ class SpotRobot(Robot):
             "arm.pose.qz": float(body_tform_hand.rot.z),
         }
 
+    def _get_gripper_state(self) -> Dict[str, float]:
+        """Read gripper open percentage from ManipulatorState."""
+        if self._state_client is None:
+            raise ConnectionError("RobotStateClient not initialized.")
+        state = self._state_client.get_robot_state()
+        pct = 0.0
+        if state.HasField("manipulator_state"):
+            pct = float(state.manipulator_state.gripper_open_percentage)
+        return {"arm.gripper_open_percentage": pct}
+
     def _get_images(self) -> Dict[str, np.ndarray]:
         """
         Fetch images from Spot's onboard cameras.
@@ -463,6 +477,7 @@ class SpotRobot(Robot):
         obs.update(self._get_base_state())
 
         obs.update(self._get_hand_pose())
+        obs.update(self._get_gripper_state())
 
         images = self._get_images()
         for src in self._image_sources:
@@ -585,6 +600,17 @@ class SpotRobot(Robot):
         )
         self._command_client.robot_command(arm_cmd)
 
+        # ----------------------
+        # Gripper command
+        # ----------------------
+        gripper_pct = float(action.get("arm.gripper_open_percentage", -1.0))
+        if gripper_pct >= 0.0:
+            fraction = max(0.0, min(1.0, gripper_pct / 100.0))
+            gripper_cmd = RobotCommandBuilder.claw_gripper_open_fraction_command(fraction)
+            self._command_client.robot_command(gripper_cmd)
+            gripper_pct = fraction * 100.0
+        # else: negative sentinel means no gripper command (backward compat)
+
         # Return the action actually sent after clamping
         sent_action: Dict[str, Any] = {
             "base.vx":   vx,
@@ -597,6 +623,7 @@ class SpotRobot(Robot):
             "arm.pose.qx": qx,
             "arm.pose.qy": qy,
             "arm.pose.qz": qz,
+            "arm.gripper_open_percentage": max(gripper_pct, 0.0),
         }
 
         return sent_action
