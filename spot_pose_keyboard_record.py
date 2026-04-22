@@ -46,8 +46,15 @@ from pathlib import Path
 from typing import Any
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.pipeline_features import aggregate_pipeline_dataset_features, create_initial_features
-from lerobot.datasets.utils import build_dataset_frame, combine_feature_dicts, hw_to_dataset_features
+from lerobot.datasets.pipeline_features import (
+    aggregate_pipeline_dataset_features,
+    create_initial_features,
+)
+from lerobot.datasets.utils import (
+    build_dataset_frame,
+    combine_feature_dicts,
+    hw_to_dataset_features,
+)
 from lerobot.processor import make_default_processors
 from lerobot.utils.constants import ACTION, OBS_STR
 
@@ -95,7 +102,9 @@ def clamp(value: float, limit: float) -> float:
     return float(max(-limit, min(limit, value)))
 
 
-def normalize_quat(qw: float, qx: float, qy: float, qz: float) -> tuple[float, float, float, float]:
+def normalize_quat(
+    qw: float, qx: float, qy: float, qz: float
+) -> tuple[float, float, float, float]:
     n = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
     if n < 1e-8:
         return 1.0, 0.0, 0.0, 0.0
@@ -115,7 +124,9 @@ def quat_mul(
     )
 
 
-def delta_rpy_to_quat(dr: float, dp: float, dy: float) -> tuple[float, float, float, float]:
+def delta_rpy_to_quat(
+    dr: float, dp: float, dy: float
+) -> tuple[float, float, float, float]:
     cr = math.cos(dr * 0.5)
     sr = math.sin(dr * 0.5)
     cp = math.cos(dp * 0.5)
@@ -161,7 +172,9 @@ def wait_for_manual_reset() -> bool:
     """Wait until Enter to continue; return False if user chooses to quit."""
     # Drain buffered keys from teleop loop first.
     _ = poll_keys()
-    print("Reset scene, then press Enter for next episode (or press q then Enter to stop).")
+    print(
+        "Reset scene, then press Enter for next episode (or press q then Enter to stop)."
+    )
     while True:
         ready, _, _ = select.select([sys.stdin], [], [], 0.1)
         if not ready:
@@ -179,11 +192,15 @@ def print_help() -> None:
     print("  base: w/s vx, z/c vy, a/d vyaw, <space> stop base")
     print("  pos : u/j x, i/k y, o/l z")
     print("  rot : 7/4 roll, 8/5 pitch, 9/6 yaw")
-    print("  arm : r reset target to current observed hand pose, p reset to startup pose")
+    print(
+        "  arm : r reset target to current observed hand pose, p reset to startup pose"
+    )
     print("  run : n end episode, q quit, h help")
 
 
-def reset_pose_target_from_obs(arm_target: dict[str, float], obs: dict[str, Any]) -> None:
+def reset_pose_target_from_obs(
+    arm_target: dict[str, float], obs: dict[str, Any]
+) -> None:
     for k in POSE_KEYS:
         arm_target[k] = float(obs.get(k, arm_target.get(k, 0.0)))
 
@@ -299,7 +316,9 @@ def make_dataset(
     )
     if store_cameras and not use_videos:
         # Keep camera frames as image features when video encoding is disabled.
-        camera_features = {k: v for k, v in obs_features.items() if isinstance(v, tuple)}
+        camera_features = {
+            k: v for k, v in obs_features.items() if isinstance(v, tuple)
+        }
         if camera_features:
             features = combine_feature_dicts(
                 features,
@@ -332,14 +351,20 @@ def make_dataset(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Spot keyboard teleop recorder (pose target)")
+    p = argparse.ArgumentParser(
+        description="Spot keyboard teleop recorder (pose target)"
+    )
     p.add_argument("--hostname", required=True)
     p.add_argument("--username", required=True)
     p.add_argument("--password", required=True)
     p.add_argument(
         "--image-sources",
         nargs="+",
-        default=["frontleft_fisheye_image", "frontright_fisheye_image", "hand_color_image"],
+        default=[
+            "frontleft_fisheye_image",
+            "frontright_fisheye_image",
+            "hand_color_image",
+        ],
     )
     p.add_argument("--image-width", type=int, default=640)
     p.add_argument("--image-height", type=int, default=480)
@@ -359,15 +384,21 @@ def parse_args() -> argparse.Namespace:
         help="Reset wait duration when --no-manual-reset is used.",
     )
     p.add_argument("--task", type=str, default="teleop spot pose task")
-    p.add_argument("--repo-id", type=str, required=True, help="e.g. user/spot-pose-demo")
+    p.add_argument(
+        "--repo-id", type=str, required=True, help="e.g. user/spot-pose-demo"
+    )
     p.add_argument(
         "--dataset-root",
         type=str,
         default=None,
         help="Parent directory for datasets. Final path becomes <dataset-root>/<repo-id>.",
     )
-    p.add_argument("--resume", action="store_true", help="Append episodes to an existing dataset.")
-    p.add_argument("--video", action="store_true", help="Store camera frames as encoded videos")
+    p.add_argument(
+        "--resume", action="store_true", help="Append episodes to an existing dataset."
+    )
+    p.add_argument(
+        "--video", action="store_true", help="Store camera frames as encoded videos"
+    )
     p.add_argument(
         "--store-cameras",
         action=argparse.BooleanOptionalAction,
@@ -428,7 +459,9 @@ def main() -> None:
         resume=args.resume,
     )
     print(f"Dataset root: {dataset.root}")
-    print(f"Camera storage: {'video' if args.video and args.store_cameras else ('image' if args.store_cameras else 'disabled')}")
+    print(
+        f"Camera storage: {'video' if args.video and args.store_cameras else ('image' if args.store_cameras else 'disabled')}"
+    )
 
     state = TeleopState()
     loop_dt = 1.0 / float(args.fps)
@@ -539,7 +572,9 @@ def main() -> None:
 
                 print("\nSaving episode...")
                 dataset.save_episode()
-                print(f"Saved. total_episodes={dataset.num_episodes} total_frames={dataset.num_frames}")
+                print(
+                    f"Saved. total_episodes={dataset.num_episodes} total_frames={dataset.num_frames}"
+                )
 
                 is_last_requested = ep >= args.num_episodes - 1
                 if state.quit_all or is_last_requested:
